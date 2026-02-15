@@ -79,10 +79,16 @@ jobs:
           SOURCE_DIR="${RUNNER_TEMP}/sdk-source"
           echo "SOURCE_DIR=$SOURCE_DIR" >> "$GITHUB_ENV"
 
+          # 使用 .netrc 认证（避免密码中特殊字符导致 URL 解析失败）
+          echo "machine codeup.aliyun.com login ${{ secrets.CODEUP_USERNAME }} password ${{ secrets.CODEUP_PASSWORD }}" > ~/.netrc
+          chmod 600 ~/.netrc
+
           echo "Cloning ref=${{ inputs.source_ref }} ..."
           git clone --depth 1 --branch "${{ inputs.source_ref }}" \
-            "https://${{ secrets.CODEUP_USERNAME }}:${{ secrets.CODEUP_PASSWORD }}@codeup.aliyun.com/yuntoo/open/lovrabet-swift-sdk.git" \
+            "https://codeup.aliyun.com/yuntoo/open/lovrabet-swift-sdk.git" \
             "$SOURCE_DIR"
+
+          rm -f ~/.netrc
 
           if [ ! -d "$SOURCE_DIR/Sources" ]; then
             echo "::error::源码目录结构异常"
