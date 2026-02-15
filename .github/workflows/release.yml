@@ -104,6 +104,23 @@ jobs:
           echo "Clone OK (commit: $SOURCE_COMMIT)"
 
       # ── 3. 构建 XCFramework ──
+      - name: Prepare source for framework build
+        run: |
+          cd "$SOURCE_DIR"
+          # SPM 默认构建静态库，需要改为 dynamic 才能生成 .framework
+          python3 -c "
+          with open('Package.swift') as f:
+              content = f.read()
+          content = content.replace(
+              'name: \"LovrabetSDK\",\n            targets:',
+              'name: \"LovrabetSDK\",\n            type: .dynamic,\n            targets:'
+          )
+          with open('Package.swift', 'w') as f:
+              f.write(content)
+          "
+          echo "Package.swift updated for dynamic framework build"
+          grep -A2 "library" Package.swift
+
       - name: Build XCFramework
         run: |
           set -eo pipefail
