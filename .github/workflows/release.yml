@@ -21,18 +21,18 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '版本号 (例: 1.0.0, 1.2.3-beta.1)'
+        description: "版本号 (例: 1.0.0, 1.2.3-beta.1)"
         required: true
         type: string
       source_ref:
-        description: '源码分支或 tag (默认: main)'
+        description: "源码分支或 tag (默认: main)"
         required: false
-        default: 'main'
+        default: "main"
         type: string
       platforms:
-        description: '构建平台'
+        description: "构建平台"
         required: false
-        default: 'all'
+        default: "all"
         type: choice
         options:
           - all
@@ -129,6 +129,16 @@ jobs:
               BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
               SWIFT_EMIT_MODULE_INTERFACE=YES \
               2>&1 | tail -5
+
+            # 检查 framework 是否生成（SPM 包的路径可能不同于标准 Xcode 项目）
+            local fw_path
+            fw_path=$(find "$BUILD_DIR/${name}.xcarchive" -name "${FRAMEWORK_NAME}.framework" -type d 2>/dev/null | head -1)
+            if [ -z "$fw_path" ]; then
+              echo "::warning::Framework not found at standard location, checking archive contents..."
+              find "$BUILD_DIR/${name}.xcarchive/Products" -type f -o -type d 2>/dev/null | head -30
+            else
+              echo "Framework: $fw_path"
+            fi
             echo "::endgroup::"
           }
 
@@ -153,13 +163,22 @@ jobs:
             build_archive "watchos-simulator" "generic/platform=watchOS Simulator"
           fi
 
-          # 收集所有 archive 参数
+          # 收集所有 framework 路径（适配 SPM 项目的非标准位置）
+          echo "::group::Creating XCFramework"
           ARGS=()
           for dir in "$BUILD_DIR"/*.xcarchive; do
-            [ -d "$dir" ] && ARGS+=("-archive" "$dir" "-framework" "$FRAMEWORK_NAME.framework")
+            [ -d "$dir" ] || continue
+            fw_path=$(find "$dir" -name "${FRAMEWORK_NAME}.framework" -type d 2>/dev/null | head -1)
+            if [ -n "$fw_path" ]; then
+              echo "Found: $fw_path"
+              ARGS+=("-framework" "$fw_path")
+            else
+              echo "::warning::No framework found in $(basename "$dir"), trying archive mode..."
+              ARGS+=("-archive" "$dir" "-framework" "$FRAMEWORK_NAME.framework")
+            fi
           done
 
-          echo "::group::Creating XCFramework"
+          echo "Creating XCFramework with ${#ARGS[@]} arguments..."
           xcodebuild -create-xcframework \
             "${ARGS[@]}" \
             -output "$OUTPUT_DIR/$FRAMEWORK_NAME.xcframework"
