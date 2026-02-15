@@ -1,0 +1,335 @@
+# =============================================================================
+# LovrabetSDK 闭源 XCFramework 构建发布工作流
+#
+# 架构说明：
+#   - 源码存放在阿里云 Codeup（私有）
+#   - 本仓库（GitHub 公开）仅用于分发预编译的 XCFramework
+#   - CI 从 Codeup 拉取源码 → 构建 → 发布 Release → 更新 Package.swift
+#
+# 触发方式：
+#   1. GitHub UI: Actions → Release → Run workflow
+#   2. CLI: gh workflow run release.yml -f version=1.0.0
+#
+# 所需 Secrets：
+#   - CODEUP_USERNAME: Codeup 用户名
+#   - CODEUP_PASSWORD: Codeup 密码或 Access Token
+# =============================================================================
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号 (例: 1.0.0, 1.2.3-beta.1)"
+        required: true
+        type: string
+      source_ref:
+        description: "源码分支或 tag (默认: main)"
+        required: false
+        default: "main"
+        type: string
+      platforms:
+        description: "构建平台"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - ios-only
+          - ios-macos
+
+env:
+  FRAMEWORK_NAME: LovrabetSDK
+  CODEUP_REPO: https://codeup.aliyun.com/yuntoo/open/lovrabet-swift-sdk.git
+
+jobs:
+  build-and-release:
+    name: Build & Release v${{ inputs.version }}
+    runs-on: macos-14
+
+    permissions:
+      contents: write
+
+    steps:
+      # ─────────────────────────────────────────────
+      # 1. 环境准备
+      # ─────────────────────────────────────────────
+      - name: Validate version
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "::error::无效的版本号格式: $VERSION (应为 x.y.z 或 x.y.z-suffix)"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Show build environment
+        run: |
+          echo "Xcode: $(xcodebuild -version | head -1)"
+          echo "Swift: $(swift --version | head -1)"
+          echo "macOS: $(sw_vers -productVersion)"
+
+      # ─────────────────────────────────────────────
+      # 2. 从 Codeup 拉取源码（临时，不会提交到本仓库）
+      # ─────────────────────────────────────────────
+      - name: Clone source from Codeup
+        run: |
+          echo "::group::Cloning source code"
+          SOURCE_DIR="${RUNNER_TEMP}/sdk-source"
+          REPO_URL="https://${{ secrets.CODEUP_USERNAME }}:${{ secrets.CODEUP_PASSWORD }}@codeup.aliyun.com/yuntoo/open/lovrabet-swift-sdk.git"
+
+          git clone --depth 1 --branch "${{ inputs.source_ref }}" "$REPO_URL" "$SOURCE_DIR" 2>&1 | grep -v 'password\|token\|codeup'
+
+          echo "SOURCE_DIR=$SOURCE_DIR" >> "$GITHUB_ENV"
+          echo "Source ref: ${{ inputs.source_ref }}"
+          echo "Source commit: $(cd $SOURCE_DIR && git rev-parse --short HEAD)"
+          echo "::endgroup::"
+
+      # ─────────────────────────────────────────────
+      # 3. 构建各平台 XCFramework
+      # ─────────────────────────────────────────────
+      - name: Build XCFramework
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+
+          BUILD_DIR=".build/xcframework"
+          OUTPUT_DIR=".build/output"
+          mkdir -p "$BUILD_DIR" "$OUTPUT_DIR"
+
+          PLATFORMS="${{ inputs.platforms }}"
+          ARCHIVES=()
+
+          build_archive() {
+            local name="$1"
+            local destination="$2"
+            echo "::group::Building $name"
+            xcodebuild archive \
+              -scheme "$FRAMEWORK_NAME" \
+              -destination "$destination" \
+              -archivePath "$BUILD_DIR/${name}.xcarchive" \
+              -derivedDataPath "$BUILD_DIR/DerivedData" \
+              SKIP_INSTALL=NO \
+              BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
+              SWIFT_EMIT_MODULE_INTERFACE=YES \
+              2>&1 | grep -E '^\*\*|error:|warning:' || true
+            ARCHIVES+=("-archive" "$BUILD_DIR/${name}.xcarchive" "-framework" "$FRAMEWORK_NAME.framework")
+            echo "::endgroup::"
+          }
+
+          # --- 始终构建 iOS ---
+          build_archive "ios-device"    "generic/platform=iOS"
+          build_archive "ios-simulator" "generic/platform=iOS Simulator"
+
+          # --- macOS ---
+          if [[ "$PLATFORMS" == "all" || "$PLATFORMS" == "ios-macos" ]]; then
+            build_archive "macos" "generic/platform=macOS"
+          fi
+
+          # --- tvOS ---
+          if [[ "$PLATFORMS" == "all" ]]; then
+            build_archive "tvos-device"    "generic/platform=tvOS"
+            build_archive "tvos-simulator" "generic/platform=tvOS Simulator"
+          fi
+
+          # --- watchOS ---
+          if [[ "$PLATFORMS" == "all" ]]; then
+            build_archive "watchos-device"    "generic/platform=watchOS"
+            build_archive "watchos-simulator" "generic/platform=watchOS Simulator"
+          fi
+
+          # --- 合并为 XCFramework ---
+          echo "::group::Creating XCFramework"
+          xcodebuild -create-xcframework \
+            "${ARCHIVES[@]}" \
+            -output "$OUTPUT_DIR/$FRAMEWORK_NAME.xcframework"
+          echo "::endgroup::"
+
+          if [ ! -d "$OUTPUT_DIR/$FRAMEWORK_NAME.xcframework" ]; then
+            echo "::error::XCFramework 创建失败"
+            exit 1
+          fi
+
+          echo "OUTPUT_DIR=$(cd $OUTPUT_DIR && pwd)" >> "$GITHUB_ENV"
+          echo "XCFramework 创建成功"
+          ls -lh "$OUTPUT_DIR/"
+
+      # ─────────────────────────────────────────────
+      # 4. 打包 & 计算 Checksum
+      # ─────────────────────────────────────────────
+      - name: Package & Checksum
+        id: package
+        run: |
+          ZIP_NAME="${FRAMEWORK_NAME}-${VERSION}.zip"
+
+          cd "$OUTPUT_DIR"
+          zip -r -y "$ZIP_NAME" "${FRAMEWORK_NAME}.xcframework"
+
+          CHECKSUM=$(swift package compute-checksum "$ZIP_NAME")
+          ZIP_SIZE=$(du -h "$ZIP_NAME" | cut -f1)
+
+          echo "zip_name=$ZIP_NAME"       >> "$GITHUB_OUTPUT"
+          echo "zip_path=$OUTPUT_DIR/$ZIP_NAME" >> "$GITHUB_OUTPUT"
+          echo "checksum=$CHECKSUM"        >> "$GITHUB_OUTPUT"
+
+          echo "Package: $ZIP_NAME ($ZIP_SIZE)"
+          echo "Checksum: $CHECKSUM"
+
+      # ─────────────────────────────────────────────
+      # 5. 清理源码（安全起见）
+      # ─────────────────────────────────────────────
+      - name: Cleanup source code
+        if: always()
+        run: rm -rf "$SOURCE_DIR"
+
+      # ─────────────────────────────────────────────
+      # 6. 创建 GitHub Release & 上传 zip
+      # ─────────────────────────────────────────────
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ZIP_PATH="${{ steps.package.outputs.zip_path }}"
+          CHECKSUM="${{ steps.package.outputs.checksum }}"
+          ZIP_NAME="${{ steps.package.outputs.zip_name }}"
+          SOURCE_COMMIT="$(cd ${RUNNER_TEMP}/sdk-source 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+
+          NOTES=$(cat <<EOF
+          ## LovrabetSDK v${VERSION}
+
+          ### Swift Package Manager
+
+          \`\`\`swift
+          dependencies: [
+              .package(url: "https://github.com/${{ github.repository }}.git", from: "${VERSION}")
+          ]
+          \`\`\`
+
+          ### Xcode
+
+          File → Add Package Dependencies → 输入 URL：
+          \`\`\`
+          https://github.com/${{ github.repository }}.git
+          \`\`\`
+
+          ---
+
+          | 项目 | 值 |
+          |------|---|
+          | Checksum | \`${CHECKSUM}\` |
+          | Platforms | ${{ inputs.platforms }} |
+          | Source ref | \`${{ inputs.source_ref }}\` |
+          EOF
+          )
+
+          gh release create "$VERSION" \
+            --title "v${VERSION}" \
+            --notes "$NOTES" \
+            "$ZIP_PATH"
+
+      # ─────────────────────────────────────────────
+      # 7. 更新本仓库的 Package.swift（自动提交）
+      # ─────────────────────────────────────────────
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Update Package.swift
+        run: |
+          CHECKSUM="${{ steps.package.outputs.checksum }}"
+          ZIP_NAME="${{ steps.package.outputs.zip_name }}"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${VERSION}/${ZIP_NAME}"
+
+          cat > Package.swift <<'SWIFT_EOF'
+          // swift-tools-version: 5.9
+
+          import PackageDescription
+
+          let package = Package(
+              name: "LovrabetSDK",
+              platforms: [
+                  .iOS(.v15),
+                  .macOS(.v12),
+                  .tvOS(.v15),
+                  .watchOS(.v8)
+              ],
+              products: [
+                  .library(
+                      name: "LovrabetSDK",
+                      targets: ["LovrabetSDK"]
+                  ),
+              ],
+              targets: [
+                  .binaryTarget(
+                      name: "LovrabetSDK",
+          SWIFT_EOF
+
+          # 动态写入 url 和 checksum（避免 heredoc 中变量转义问题）
+          cat > Package.swift <<EOF
+          // swift-tools-version: 5.9
+
+          import PackageDescription
+
+          let package = Package(
+              name: "LovrabetSDK",
+              platforms: [
+                  .iOS(.v15),
+                  .macOS(.v12),
+                  .tvOS(.v15),
+                  .watchOS(.v8)
+              ],
+              products: [
+                  .library(
+                      name: "LovrabetSDK",
+                      targets: ["LovrabetSDK"]
+                  ),
+              ],
+              targets: [
+                  .binaryTarget(
+                      name: "LovrabetSDK",
+                      url: "$DOWNLOAD_URL",
+                      checksum: "$CHECKSUM"
+                  ),
+              ]
+          )
+          EOF
+
+      - name: Commit & Push Package.swift
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Package.swift
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "chore: update to v${VERSION}"
+          git tag -f "$VERSION"
+          git push origin main --tags --force
+
+      # ─────────────────────────────────────────────
+      # 8. 构建摘要
+      # ─────────────────────────────────────────────
+      - name: Summary
+        run: |
+          CHECKSUM="${{ steps.package.outputs.checksum }}"
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## Release v${VERSION} 发布成功
+
+          | 项目 | 值 |
+          |------|---|
+          | Version | \`${VERSION}\` |
+          | Checksum | \`${CHECKSUM}\` |
+          | Platforms | \`${{ inputs.platforms }}\` |
+          | Source | \`${{ inputs.source_ref }}\` |
+
+          ### 开发者使用方式
+
+          \`\`\`swift
+          .package(url: "https://github.com/${{ github.repository }}.git", from: "${VERSION}")
+          \`\`\`
+          EOF
