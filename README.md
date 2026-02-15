@@ -183,7 +183,7 @@ if let error = result.error {
 
 ## 文档
 
-完整的 API 文档和更多示例，请访问 [Lovrabet 开发者文档](https://docs.lovrabet.com)。
+完整的 API 文档和更多示例，请访问 [Rabetbase 开发者文档](https://open.lovrabet.com/)。
 
 ## 版本历史
 
@@ -191,8 +191,7 @@ if let error = result.error {
 
 ## 其他平台 SDK
 
-- **TypeScript/JavaScript**: `npm install @lovrabet/sdk`
-- **Android/Kotlin**: [lovrabet-android-sdk](https://github.com/lovrabet-ai/lovrabet-android-sdk)
+- **TypeScript/JavaScript**: [@lovrabet/sdk](https://www.npmjs.com/package/@lovrabet/sdk)
 
 ## 许可证
 
