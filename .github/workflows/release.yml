@@ -223,18 +223,14 @@ jobs:
           echo "Package: $ZIP_NAME ($(du -h "$ZIP_NAME" | cut -f1))"
           echo "Checksum: $CHECKSUM"
 
-      # ── 5. 清理源码 ──
-      - name: Cleanup source code
-        if: always()
-        run: rm -rf "${SOURCE_DIR:-/tmp/nonexistent}"
-
-      # ── 6. 创建 GitHub Release ──
+      # ── 5. 创建 GitHub Release ──
       - name: Create Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           CHECKSUM="${{ steps.package.outputs.checksum }}"
           gh release create "$VERSION" \
+            --repo "${{ github.repository }}" \
             --title "v${VERSION}" \
             --notes "## LovrabetSDK v${VERSION}
           ### Swift Package Manager
@@ -252,6 +248,11 @@ jobs:
           | Platforms | \`${{ inputs.platforms }}\` |
           | Source | \`${{ inputs.source_ref }}\` (\`${SOURCE_COMMIT}\`) |" \
             "${{ steps.package.outputs.zip_path }}"
+
+      # ── 5.1 清理源码 ──
+      - name: Cleanup source code
+        if: always()
+        run: rm -rf "${SOURCE_DIR:-/tmp/nonexistent}"
 
       # ── 7. 更新 Package.swift ──
       - name: Checkout this repo
